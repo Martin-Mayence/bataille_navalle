@@ -1,5 +1,7 @@
 import random
 import re
+import shutil
+import sys
 
 from bataille_navalle.boat import Boat
 from bataille_navalle.grid import Grid
@@ -200,86 +202,91 @@ class Partie:
         left = player.grid.lines(color=True)
         right = opponent.grid.lines(hide_boats=True, color=True)
 
-        left_width = max(map(self._visible_width, left))
-        right_width = max(map(self._visible_width, right))
+        left_width = max(self._visible_width(line) for line in left)
+        right_width = max(self._visible_width(line) for line in right)
 
-        gap = "    "
-        journal_width = 40
+        gap = "   "
+        journal_width = 38
 
-        heading = (
-            "TA FLOTTE".ljust(left_width)
+        total_width = left_width + right_width + journal_width + 2 * len(gap)
+
+        print(
+            f"{self.BOLD}"
+            + self._pad_ansi("TA FLOTTE", left_width)
             + gap
-            + "GRILLE ADVERSE".ljust(right_width)
+            + self._pad_ansi("GRILLE ADVERSE", right_width)
             + gap
-            + "JOURNAL DU TOUR"
+            + "JOURNAL DES TIRS"
+            + self.RESET
         )
 
-        print("\n" + heading)
-
-        print("-" * (left_width + right_width + len(gap) * 2 + journal_width))
+        print("-" * total_width)
 
         height = max(len(left), len(right))
 
-        # On garde une ligne pour le titre
-        # et une ligne vide.
+        # Le journal occupe les lignes disponibles.
         max_events = max(0, height - 2)
-
         recent = self.journal[-max_events:] if max_events else []
 
         notes = [""] * height
-        notes[0] = "Derniers événements :"
+        notes[0] = "Événements récents"
 
-        # Aligner les événements en bas
         start = height - len(recent)
 
-        for i, event in enumerate(recent):
-            notes[start + i] = event
+        for index, event in enumerate(recent):
+            if index == len(recent) - 1:
+                notes[start + index] = f"{self.BOLD}> {event}{self.RESET}"
+            else:
+                notes[start + index] = f"  {event}"
 
-        for i in range(height):
-            a = left[i] if i < len(left) else ""
-            b = right[i] if i < len(right) else ""
-            note = notes[i]
+        for index in range(height):
+            a = left[index] if index < len(left) else ""
+            b = right[index] if index < len(right) else ""
 
             print(
-                a
-                + " " * (left_width - self._visible_width(a))
+                self._pad_ansi(a, left_width)
                 + gap
-                + b
-                + " " * (right_width - self._visible_width(b))
+                + self._pad_ansi(b, right_width)
                 + gap
-                + note
+                + notes[index]
             )
 
+        print()
         print(
-            f"\n{self.GREEN}B = Bateau{self.RESET}"
+            f"{self.GREEN}B = Bateau{self.RESET}"
             f"   {self.RED}X = Touché{self.RESET}"
             f"   {self.YELLOW}o = Raté{self.RESET}"
             f"   {self.CYAN}~ = Eau{self.RESET}"
         )
 
-        human_remaining = sum(not boat.is_sunk() for boat in player.grid.boats)
+        self._status_bar(player, opponent)
 
-        enemy_remaining = sum(not boat.is_sunk() for boat in opponent.grid.boats)
-
-        print(
-            f"\nTes bateaux : {human_remaining}"
-            f"   |   Bateaux adverses : {enemy_remaining}"
-        )
-
-        print(f"Tour : {self.turn_number}")
+        if self._terminal_width() < total_width:
+            print(
+                f"\n{self.YELLOW}"
+                "Conseil : agrandis le terminal pour "
+                "voir les trois colonnes."
+                f"{self.RESET}"
+            )
 
     def _record_shot(self, player, row, col, result):
         if result in ("Déjà tiré", "Hors grille", "Aucun tir disponible"):
             return
 
-        name = "IA" if player.is_computer else "Toi"
-
+        name = "IA " if player.is_computer else "TOI"
         position = f"{chr(65 + row)}{col}"
+
+        if result == "Coulé":
+            symbol = "!"
+        elif result == "Touché":
+            symbol = "X"
+        else:
+            symbol = "o"
 
         message = (
             f"T{self.turn_number:02} "
-            f"{name:<3} {position:<4} : "
-            f"{self._color_result(result)}"
+            f"{name} {position:<3} "
+            f"{symbol} {self._color_result(result)}"
         )
 
         self.journal.append(message)
@@ -321,41 +328,47 @@ class Partie:
         self.setup()
 
         human, computer = self.players
+        self.current = 0
+        self.turn_number = 1
+        self.journal = []
 
         while True:
             player = self.players[self.current]
             opponent = self.players[1 - self.current]
 
+            self._clear_screen()
             self._show_grids(human, computer)
 
             if player.is_computer:
-                print("\nL'ordinateur réfléchit...")
+                print("\nL'ordinateur joue...")
 
                 row, col, result = player.computer_attack(opponent)
 
                 if result == "Aucun tir disponible":
-                    print(result)
-                    break
-
-                print(f"IA : {chr(65 + row)}{col} -> {result}")
+                    print("Aucun tir disponible.")
+                    return
 
             else:
                 print("\nÀ toi de jouer !")
-
                 row, col = self.demander_coordonnees()
 
                 result = player.attack(opponent, row, col)
 
                 if result in ("Déjà tiré", "Hors grille"):
-                    print(f"{self.YELLOW}Tir invalide : {result}{self.RESET}")
+                    print(f"{self.YELLOW}{result} : recommence.{self.RESET}")
                     continue
-
-                print(f"\nRésultat : {self._color_result(result)}")
 
             self._record_shot(player, row, col, result)
 
-            # Actualiser immédiatement les grilles
+            self._clear_screen()
             self._show_grids(human, computer)
+
+            print(
+                f"\nDernier tir : "
+                f"{player.name} "
+                f"{chr(65 + row)}{col} "
+                f"-> {self._color_result(result)}"
+            )
 
             if opponent.grid.all_sunk():
                 self._show_statistics(player)
@@ -365,3 +378,38 @@ class Partie:
                 self.turn_number += 1
 
             self.current = 1 - self.current
+
+
+    def _clear_screen(self):
+        """Efface le terminal avant le nouvel affichage."""
+        if sys.stdout.isatty():
+            print("\033[2J\033[H", end="", flush=True)
+
+    def _terminal_width(self):
+        return shutil.get_terminal_size(fallback=(120, 30)).columns
+
+    def _pad_ansi(self, value, width):
+        """Complète une chaîne en ignorant les codes ANSI."""
+        visible = self._visible_width(value)
+        return value + " " * max(0, width - visible)
+
+    def _status_bar(self, human, computer):
+        human_remaining = sum(not boat.is_sunk() for boat in human.grid.boats)
+
+        computer_remaining = sum(not boat.is_sunk() for boat in computer.grid.boats)
+
+        difficulty = computer.difficulty.upper()
+
+        print(f"\n{self.BOLD}TOUR {self.turn_number}{self.RESET}  |  IA : {difficulty}")
+
+        print(
+            f"{self.GREEN}"
+            f"TES NAVIRES : {human_remaining}"
+            f"{self.RESET}"
+            "  |  "
+            f"{self.RED}"
+            f"NAVIRES ADVERSES : {computer_remaining}"
+            f"{self.RESET}"
+        )
+
+        print(f"Tirs : {human.total_shots}  |  Précision : {human.accuracy():.1f}%")

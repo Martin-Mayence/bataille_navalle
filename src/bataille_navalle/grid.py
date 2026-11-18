@@ -72,3 +72,17 @@ class Grid:
     def display(self, hide_boats=False, color=True):
         print("\n".join(self.lines(hide_boats, color)))
         print("B = Bateau   X = Touché   o = Raté   ~ = Eau")
+
+    def sunk_positions_at(self, row, col):
+        """Positions publiques du bateau coulé par ce tir.
+
+        Retourne None si aucun bateau coulé ne
+        correspond à la coordonnée.
+        """
+        position = (row, col)
+
+        for boat in self.boats:
+            if position in boat.positions and boat.is_sunk():
+                return frozenset(boat.positions)
+
+        return None

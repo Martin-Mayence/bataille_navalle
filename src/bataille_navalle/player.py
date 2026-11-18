@@ -4,7 +4,13 @@ from bataille_navalle.grid import Grid
 
 
 class Player:
-    def __init__(self, name, is_computer=False, grid_size=10, difficulty="normal"):
+    def __init__(
+        self,
+        name,
+        is_computer=False,
+        grid_size=10,
+        difficulty="normal",
+    ):
         if difficulty not in ("facile", "normal", "difficile"):
             raise ValueError("Difficulté inconnue")
 
@@ -18,13 +24,14 @@ class Player:
         self.targets = []
         self.misses = set()
         self.sunk_positions = set()
+        self.pending_hits = set()
 
         self.total_shots = 0
         self.successful_shots = 0
         self.sunk_count = 0
 
-        # Mémoire des touches non résolues
-        self.pending_hits = set()
+        # Tailles des bateaux restant à couler.
+        self.remaining_sizes = [5, 4, 3, 3, 2]
 
     def attack(self, opponent, row, col):
         size = opponent.grid.size
@@ -32,53 +39,100 @@ class Player:
         if not (0 <= row < size and 0 <= col < size):
             return "Hors grille"
 
-        if (row, col) in self.shots:
+        position = (row, col)
+
+        if position in self.shots:
             return "Déjà tiré"
 
         result = opponent.grid.shoot(row, col)
 
-        self.shots.add((row, col))
+        if result in ("Hors grille", "Déjà tiré"):
+            return result
+
+        self.shots.add(position)
         self.total_shots += 1
 
-        if result in ("Touché", "Coulé"):
-            self.successful_shots += 1
+        if result == "À l'eau":
+            self.misses.add(position)
 
-        if result == "Coulé":
+        elif result == "Touché":
+            self.successful_shots += 1
+            self.pending_hits.add(position)
+
+        elif result == "Coulé":
+            self.successful_shots += 1
             self.sunk_count += 1
 
-        if result == "À l'eau":
-            self.misses.add((row, col))
+            # Seul le bateau coulé est révélé.
+            positions = opponent.grid.sunk_positions_at(row, col)
+
+            if positions is not None:
+                self._resolve_sunk(positions, row, col)
+                length = len(positions)
+
+                if length in self.remaining_sizes:
+                    self.remaining_sizes.remove(length)
+
+        self.hits = sorted(self.pending_hits)
+        self.update_targets(size)
 
         return result
 
     def accuracy(self):
-        if self.total_shots == 0:
+        if not self.total_shots:
             return 0.0
 
-        return self.successful_shots / self.total_shots * 100
+        return 100 * self.successful_shots / self.total_shots
 
     def _neighbors(self, position, size):
         row, col = position
 
-        directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            nr = row + dr
+            nc = col + dc
 
-        return [
-            (row + dr, col + dc)
-            for dr, dc in directions
-            if 0 <= row + dr < size and 0 <= col + dc < size
-        ]
+            if 0 <= nr < size and 0 <= nc < size:
+                yield nr, nc
+
+    def _resolve_sunk(self, boat, row, col):
+        """Retire uniquement les touches du bateau coulé.
+
+        boat peut être un objet Boat, un ensemble
+        de positions ou None (ancien test).
+        """
+        position = (row, col)
+
+        if boat is not None:
+            if hasattr(boat, "positions"):
+                positions = set(boat.positions)
+            else:
+                positions = set(boat)
+
+        else:
+            # Compatibilité avec les anciens tests.
+            # Sans preuve, on conserve les autres
+            # touches plutôt que de les supprimer.
+            positions = {position}
+
+        self.pending_hits.update(self.hits)
+        self.pending_hits.difference_update(positions)
+        self.sunk_positions.update(positions)
+
+        self.hits = sorted(self.pending_hits)
+        self.update_targets(self.grid.size)
 
     def _target_scores(self, size):
+        """Attribue un score aux cases voisines."""
         scores = {}
 
-        for row, col in self.pending_hits:
-            for target in self._neighbors((row, col), size):
-                if target in self.shots:
+        for hit in self.pending_hits:
+            for position in self._neighbors(hit, size):
+                if position in self.shots:
                     continue
 
-                scores[target] = scores.get(target, 0) + 1
+                scores[position] = scores.get(position, 0) + 1
 
-        # Bonus pour les alignements de touches
+        # Favoriser les prolongements d'alignements.
         for row, col in self.pending_hits:
             for dr, dc in ((0, 1), (1, 0)):
                 for sign in (-1, 1):
@@ -88,8 +142,8 @@ class Player:
                     if (nr, nc) not in self.pending_hits:
                         continue
 
-                    end_r = nr + dr * sign
-                    end_c = nc + dc * sign
+                    end_r = nr
+                    end_c = nc
 
                     while (end_r, end_c) in self.pending_hits:
                         end_r += dr * sign
@@ -108,68 +162,50 @@ class Player:
 
     def update_targets(self, size):
         scores = self._target_scores(size)
-        self.targets = sorted(scores, key=lambda p: scores[p], reverse=True)
 
-    def _resolve_sunk(self, boat, row, col):
-        position = (row, col)
+        self.targets = sorted(
+            scores,
+            key=lambda pos: (-scores[pos], pos[0], pos[1]),
+        )
 
-        # Compatibilité avec les anciennes touches
-        self.pending_hits.update(self.hits)
-
-        if boat is not None:
-            # Si le bateau est connu, retirer uniquement
-            # les positions de ce bateau.
-            sunk_positions = set(boat.positions)
+    def _hard_search(self, available, size):
+        """Recherche stratégique sans information cachée."""
+        # Les bateaux de longueur 2 ou plus
+        # peuvent être recherchés en damier.
+        if self.remaining_sizes and min(self.remaining_sizes) >= 2:
+            candidates = [pos for pos in available if sum(pos) % 2 == 0]
         else:
-            # Sinon, déterminer le segment probable
-            # à partir des touches connues.
-            hit_set = self.pending_hits | {position}
-            segments = []
+            candidates = []
 
-            for dr, dc in ((0, 1), (1, 0)):
-                segment = {position}
+        candidates = candidates or available
 
-                for sign in (-1, 1):
-                    nr = row + dr * sign
-                    nc = col + dc * sign
+        # Score basé sur les possibilités de placement.
+        scores = {}
 
-                    while (nr, nc) in hit_set:
-                        segment.add((nr, nc))
-                        nr += dr * sign
-                        nc += dc * sign
+        for row, col in candidates:
+            score = 0
 
-                segments.append(segment)
+            for length in self.remaining_sizes:
+                for dr, dc in ((0, 1), (1, 0)):
+                    for offset in range(length):
+                        start_r = row - offset * dr
+                        start_c = col - offset * dc
 
-            sunk_positions = max(segments, key=len)
+                        positions = [
+                            (start_r + i * dr, start_c + i * dc) for i in range(length)
+                        ]
 
-        self.sunk_positions.update(sunk_positions)
-        self.pending_hits.difference_update(sunk_positions)
+                        if all(
+                            0 <= r < size and 0 <= c < size and (r, c) not in self.shots
+                            for r, c in positions
+                        ):
+                            score += 1
 
-        # Synchroniser les anciennes et nouvelles données
-        self.hits = sorted(self.pending_hits)
-
-        self.update_targets(self.grid.size)
-
-    def _random_search(self, available):
-        return random.choice(available)
-
-    def _hard_search(self, available):
-        # Recherche en damier
-        checkerboard = [pos for pos in available if (pos[0] + pos[1]) % 2 == 0]
-
-        candidates = checkerboard or available
-
-        # Favoriser les cases centrales
-        size = self.grid.size
-        center = (size - 1) / 2
-
-        scores = {
-            pos: (-abs(pos[0] - center) - abs(pos[1] - center)) for pos in candidates
-        }
+            scores[(row, col)] = score
 
         best = max(scores.values())
 
-        choices = [pos for pos in candidates if scores[pos] == best]
+        choices = [pos for pos, score in scores.items() if score == best]
 
         return random.choice(choices)
 
@@ -186,32 +222,25 @@ class Player:
         self.update_targets(size)
 
         if self.difficulty == "facile":
-            row, col = self._random_search(available)
+            row, col = random.choice(available)
 
         elif self.targets:
             if self.difficulty == "normal":
-                # Choix parmi les cibles voisines
                 row, col = random.choice(self.targets[:4])
             else:
-                # Priorité à la cible la mieux notée
-                row, col = self.targets[0]
+                scores = self._target_scores(size)
+                best = max(scores.values())
+
+                choices = [pos for pos in self.targets if scores[pos] == best]
+
+                row, col = random.choice(choices)
 
         elif self.difficulty == "difficile":
-            row, col = self._hard_search(available)
+            row, col = self._hard_search(available, size)
 
         else:
-            row, col = self._random_search(available)
+            row, col = random.choice(available)
 
         result = self.attack(opponent, row, col)
-        position = (row, col)
-
-        if result == "Touché":
-            self.pending_hits.add(position)
-
-        elif result == "Coulé":
-            self._resolve_sunk(None, row, col)
-
-        self.hits = sorted(self.pending_hits)
-        self.update_targets(size)
 
         return row, col, result
